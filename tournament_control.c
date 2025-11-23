@@ -309,7 +309,7 @@ int main(int argc, char *argv[]) {
 
     printf("Ожидание подключения бойцов\n");
 
-    int max_wait = 30;
+    int max_wait = 60;
     int ready_fighters = 0;
     while (max_wait > 0) {
         ready_fighters = check_fighters_ready();
