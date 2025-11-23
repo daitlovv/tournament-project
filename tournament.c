@@ -7,11 +7,13 @@
 #include <semaphore.h>
 #include <signal.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <time.h>
 #include <errno.h>
+#include <time.h>
 
 #define MAX_FIGHTERS 32
+#define MSG_SIZE 256
+#define OBSERVER_PATH_BASE "/tmp/battle_observer"
+#define MAX_OBSERVERS 10
 
 typedef enum {
     ROCK = 0,
@@ -20,12 +22,24 @@ typedef enum {
 } HandSign;
 
 typedef struct {
+    char text[MSG_SIZE];
+    int from_id;
+    int against_id;
+    int round_count;
+    int is_result;
+    HandSign move1;
+    HandSign move2;
+    int duel_rounds;
+} DuelMessage;
+
+typedef struct {
     int id;
     int active;
     int victories;
     HandSign gesture;
     int has_rival;
     int rival_id;
+    int connected;
 } Combatant;
 
 typedef struct {
@@ -37,10 +51,11 @@ typedef struct {
     int terminated;
 } Arena;
 
-sem_t *combat_sem;
-sem_t *display_sem;
 Arena *combat_zone;
 int zone_fd;
+sem_t *combat_sem;
+sem_t *display_sem;
+sem_t *watch_sem;
 
 void sem_lock(sem_t *sem) {
     int result;
@@ -56,23 +71,59 @@ void sem_unlock(sem_t *sem) {
     } while (result == -1 && errno == EINTR);
 }
 
-void zone_cleanup() {
-    printf("Очистка ресурсов турнира\n");
+void cleanup_pipes() {
+    for (int i = 0; i < MAX_OBSERVERS; i++) {
+        char pipe_path[64];
+        snprintf(pipe_path, sizeof(pipe_path), "%s_%d", OBSERVER_PATH_BASE, i);
+        unlink(pipe_path);
+    }
+}
 
-    if (combat_sem != NULL) {
-        sem_destroy(combat_sem);
-        free(combat_sem);
+void send_to_watchers(const char* message, int from_id, int against_id,
+                      int is_result, HandSign move1, HandSign move2, int duel_rounds) {
+    DuelMessage msg;
+    strncpy(msg.text, message, MSG_SIZE-1);
+    msg.text[MSG_SIZE-1] = '\0';
+    msg.from_id = from_id;
+    msg.against_id = against_id;
+    msg.round_count = combat_zone->round_num;
+    msg.is_result = is_result;
+    msg.move1 = move1;
+    msg.move2 = move2;
+    msg.duel_rounds = duel_rounds;
+
+    for (int i = 0; i < MAX_OBSERVERS; i++) {
+        char pipe_path[64];
+        snprintf(pipe_path, sizeof(pipe_path), "%s_%d", OBSERVER_PATH_BASE, i);
+        int pipe_fd = open(pipe_path, O_WRONLY | O_NONBLOCK);
+        if (pipe_fd != -1) {
+            ssize_t written = write(pipe_fd, &msg, sizeof(DuelMessage));
+            close(pipe_fd);
+        }
     }
-    if (display_sem != NULL) {
-        sem_destroy(display_sem);
-        free(display_sem);
-    }
+}
+
+void zone_cleanup() {
+    cleanup_pipes();
+
     if (combat_zone) {
         munmap(combat_zone, sizeof(Arena));
     }
     if (zone_fd != -1) {
         close(zone_fd);
-        shm_unlink("/battle_zone");
+        shm_unlink("/battle_ground");
+    }
+    if (combat_sem != SEM_FAILED) {
+        sem_close(combat_sem);
+        sem_unlink("/battle_semaphore");
+    }
+    if (display_sem != SEM_FAILED) {
+        sem_close(display_sem);
+        sem_unlink("/display_semaphore");
+    }
+    if (watch_sem != SEM_FAILED) {
+        sem_close(watch_sem);
+        sem_unlink("/observer_semaphore");
     }
 }
 
@@ -80,147 +131,21 @@ void signal_handler(int sig) {
     printf("Турнир остановлен по сигналу %d\n", sig);
 
     sem_lock(combat_sem);
-    if (combat_zone) {
-        combat_zone->finished = 1;
-        combat_zone->terminated = 1;
-    }
+    combat_zone->finished = 1;
+    combat_zone->terminated = 1;
     sem_unlock(combat_sem);
 
+    send_to_watchers("Турнир остановлен по сигналу", -1, -1, 0, ROCK, ROCK, 0);
+
+    sleep(2);
     zone_cleanup();
     exit(0);
-}
-
-HandSign get_winner(HandSign sign1, HandSign sign2) {
-    if (sign1 == sign2) return -1;
-
-    if ((sign1 == ROCK && sign2 == SCISSORS) ||
-        (sign1 == SCISSORS && sign2 == PAPER) ||
-        (sign1 == PAPER && sign2 == ROCK)) {
-        return sign1;
-    }
-    return sign2;
-}
-
-const char* gesture_name(HandSign sign) {
-    switch(sign) {
-        case ROCK: return "Камень";
-        case SCISSORS: return "Ножницы";
-        case PAPER: return "Бумага";
-        default: return "Неизвестно";
-    }
-}
-
-void fighter_process(int id) {
-    srand(time(NULL) + id + getpid());
-
-    printf("Боец %d начал участие в турнире\n", id);
-
-    while (1) {
-        sem_lock(combat_sem);
-
-        if (combat_zone->finished || combat_zone->terminated) {
-            sem_unlock(combat_sem);
-            break;
-        }
-
-        if (!combat_zone->fighters[id].active) {
-            sem_unlock(combat_sem);
-            break;
-        }
-
-        if (combat_zone->fighters[id].has_rival) {
-            int rival_id = combat_zone->fighters[id].rival_id;
-
-            if (rival_id < 0 || rival_id >= combat_zone->total_count ||
-                !combat_zone->fighters[rival_id].active) {
-                combat_zone->fighters[id].has_rival = 0;
-                combat_zone->fighters[id].rival_id = -1;
-                sem_unlock(combat_sem);
-                continue;
-            }
-
-            HandSign my_move, rival_move, winner_move;
-            int round_count = 0;
-
-            do {
-                round_count++;
-                my_move = rand() % 3;
-                rival_move = rand() % 3;
-                winner_move = get_winner(my_move, rival_move);
-
-                combat_zone->fighters[id].gesture = my_move;
-                combat_zone->fighters[rival_id].gesture = rival_move;
-
-                sem_lock(display_sem);
-                printf("Боец %d: %s против Бойца %d: %s",
-                       id, gesture_name(my_move), rival_id, gesture_name(rival_move));
-
-                if (winner_move == -1) {
-                    printf(" -> Ничья! Раунд %d\n", round_count);
-                } else if (winner_move == my_move) {
-                    printf(" -> Победил Боец %d! (раунд %d)\n", id, round_count);
-                } else {
-                    printf(" -> Победил Боец %d! (раунд %d)\n", rival_id, round_count);
-                }
-                sem_unlock(display_sem);
-
-                if (winner_move == -1) {
-                    struct timespec delay = {0, 500000000};
-                    int sleep_result;
-                    do {
-                        sleep_result = nanosleep(&delay, &delay);
-                    } while (sleep_result == -1 && errno == EINTR);
-
-                    if (combat_zone->finished || combat_zone->terminated ||
-                        !combat_zone->fighters[id].active ||
-                        !combat_zone->fighters[rival_id].active) {
-                        break;
-                    }
-                }
-            } while (winner_move == -1);
-
-            if (combat_zone->finished || combat_zone->terminated ||
-                !combat_zone->fighters[id].active) {
-                sem_unlock(combat_sem);
-                break;
-            }
-
-            if (winner_move != -1) {
-                if (winner_move == my_move) {
-                    combat_zone->fighters[id].victories++;
-                    combat_zone->fighters[rival_id].active = 0;
-                    combat_zone->alive_count--;
-                    printf("Боец %d выбывает из турнира\n", rival_id);
-                } else {
-                    combat_zone->fighters[rival_id].victories++;
-                    combat_zone->fighters[id].active = 0;
-                    combat_zone->alive_count--;
-                    printf("Боец %d выбывает из турнира\n", id);
-                }
-            }
-
-            combat_zone->fighters[id].has_rival = 0;
-            combat_zone->fighters[id].rival_id = -1;
-            combat_zone->fighters[rival_id].has_rival = 0;
-            combat_zone->fighters[rival_id].rival_id = -1;
-        }
-
-        sem_unlock(combat_sem);
-
-        struct timespec delay = {0, 300000000};
-        int sleep_result;
-        do {
-            sleep_result = nanosleep(&delay, &delay);
-        } while (sleep_result == -1 && errno == EINTR);
-    }
-
-    printf("Боец %d завершил участие\n", id);
 }
 
 void setup_round() {
     sem_lock(combat_sem);
 
-    if (combat_zone->finished || combat_zone->terminated) {
+    if (combat_zone->finished) {
         sem_unlock(combat_sem);
         return;
     }
@@ -251,20 +176,37 @@ void setup_round() {
         combat_zone->fighters[fighter2].has_rival = 1;
         combat_zone->fighters[fighter2].rival_id = fighter1;
 
-        sem_lock(display_sem);
-        printf("Организован бой: Боец %d vs Боец %d\n", fighter1, fighter2);
-        sem_unlock(display_sem);
+        char message[MSG_SIZE];
+        snprintf(message, MSG_SIZE, "Организован бой: Боец %d vs Боец %d", fighter1, fighter2);
+        send_to_watchers(message, -1, -1, 0, ROCK, ROCK, 0);
     }
 
     if (count % 2 == 1 && count > 1) {
         int lucky_fighter = ready_fighters[count - 1];
-        sem_lock(display_sem);
-        printf("Боец %d проходит автоматически в следующий раунд\n", lucky_fighter);
-        sem_unlock(display_sem);
+        char message[MSG_SIZE];
+        snprintf(message, MSG_SIZE, "Боец %d проходит автоматически", lucky_fighter);
+        send_to_watchers(message, -1, -1, 0, ROCK, ROCK, 0);
     }
 
     combat_zone->round_num++;
+
+    char round_msg[MSG_SIZE];
+    snprintf(round_msg, MSG_SIZE, "Начало раунда %d", combat_zone->round_num);
+    send_to_watchers(round_msg, -1, -1, 0, ROCK, ROCK, 0);
+
     sem_unlock(combat_sem);
+}
+
+int check_fighters_ready() {
+    sem_lock(combat_sem);
+    int ready = 0;
+    for (int i = 0; i < combat_zone->total_count; i++) {
+        if (combat_zone->fighters[i].active && combat_zone->fighters[i].connected) {
+            ready++;
+        }
+    }
+    sem_unlock(combat_sem);
+    return ready;
 }
 
 int main(int argc, char *argv[]) {
@@ -283,39 +225,24 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     srand(time(NULL) + getpid());
 
-    shm_unlink("/battle_zone");
+    cleanup_pipes();
 
-    zone_fd = shm_open("/battle_zone", O_CREAT | O_RDWR, 0666);
+    zone_fd = shm_open("/battle_ground", O_CREAT | O_RDWR, 0666);
     if (zone_fd == -1) {
-        perror("Проблема с созданием разделяемой памяти");
+        perror("Проблема создания разделяемой памяти");
         return 1;
     }
 
     if (ftruncate(zone_fd, sizeof(Arena)) == -1) {
-        perror("Проблема с установкой размера разделяемой памяти");
+        perror("Проблема установки размера разделяемой памяти");
         close(zone_fd);
         return 1;
     }
 
     combat_zone = mmap(NULL, sizeof(Arena), PROT_READ | PROT_WRITE, MAP_SHARED, zone_fd, 0);
     if (combat_zone == MAP_FAILED) {
-        perror("Проблема с отображением памяти");
+        perror("Проблема отображения памяти");
         close(zone_fd);
-        return 1;
-    }
-
-    combat_sem = malloc(sizeof(sem_t));
-    display_sem = malloc(sizeof(sem_t));
-
-    if (sem_init(combat_sem, 1, 1) == -1) {
-        perror("Проблема с созданием семафора битвы");
-        zone_cleanup();
-        return 1;
-    }
-
-    if (sem_init(display_sem, 1, 1) == -1) {
-        perror("Проблема с созданием семафора отображения");
-        zone_cleanup();
         return 1;
     }
 
@@ -329,34 +256,62 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < fighter_count; i++) {
         combat_zone->fighters[i].id = i;
         combat_zone->fighters[i].active = 1;
+        combat_zone->fighters[i].connected = 0;
         combat_zone->fighters[i].victories = 0;
         combat_zone->fighters[i].gesture = ROCK;
         combat_zone->fighters[i].has_rival = 0;
         combat_zone->fighters[i].rival_id = -1;
     }
 
-    printf("Турнир Камень-Ножницы-Бумага начинается\n");
-    printf("Количество участников: %d\n", fighter_count);
-
-    pid_t pids[MAX_FIGHTERS];
-    for (int i = 0; i < fighter_count; i++) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            fighter_process(i);
-            exit(0);
-        } else if (pid < 0) {
-            perror("Проблема с созданием процесса");
-            for (int j = 0; j < i; j++) {
-                kill(pids[j], SIGTERM);
-            }
+    combat_sem = sem_open("/battle_semaphore", O_CREAT | O_EXCL, 0666, 1);
+    if (combat_sem == SEM_FAILED) {
+        if (errno == EEXIST) {
+            sem_unlink("/battle_semaphore");
+            combat_sem = sem_open("/battle_semaphore", O_CREAT, 0666, 1);
+        }
+        if (combat_sem == SEM_FAILED) {
+            perror("Проблема создания семафора битвы");
             zone_cleanup();
             return 1;
-        } else {
-            pids[i] = pid;
         }
     }
 
-    printf("Все бойцы готовы. Начинаем турнир\n\n");
+    display_sem = sem_open("/display_semaphore", O_CREAT | O_EXCL, 0666, 1);
+    if (display_sem == SEM_FAILED) {
+        if (errno == EEXIST) {
+            sem_unlink("/display_semaphore");
+            display_sem = sem_open("/display_semaphore", O_CREAT, 0666, 1);
+        }
+        if (display_sem == SEM_FAILED) {
+            perror("Проблема создания семафора отображения");
+            zone_cleanup();
+            return 1;
+        }
+    }
+
+    watch_sem = sem_open("/observer_semaphore", O_CREAT | O_EXCL, 0666, 1);
+    if (watch_sem == SEM_FAILED) {
+        if (errno == EEXIST) {
+            sem_unlink("/observer_semaphore");
+            watch_sem = sem_open("/observer_semaphore", O_CREAT, 0666, 1);
+        }
+        if (watch_sem == SEM_FAILED) {
+            perror("Проблема создания семафора наблюдателей");
+        }
+    }
+
+    printf("Центр управления турниром запущен\n");
+    printf("Количество участников: %d\n", fighter_count);
+    printf("Запустите %d процессов fighter с идентификаторами от 0 до %d\n",
+           fighter_count, fighter_count - 1);
+
+    printf("Ожидание подключения бойцов\n");
+    printf("У вас есть 60 секунд чтобы запустить бойцов.\n");
+    sleep(60);
+
+    send_to_watchers("Турнир начал работу", -1, -1, 0, ROCK, ROCK, 0);
+
+    printf("Начинаем турнир!\n");
 
     int round = 0;
     while (!combat_zone->finished) {
@@ -374,12 +329,13 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        printf("\n--- Раунд %d ---\n", ++round);
-        printf("Активных бойцов: %d\n", active);
+        sem_lock(display_sem);
+        printf("Управление: Раунд %d, активных бойцов: %d\n", round + 1, active);
+        sem_unlock(display_sem);
 
         setup_round();
 
-        sleep(3);
+        sleep(4);
 
         int duels_active;
         int max_waits = 60;
@@ -398,25 +354,28 @@ int main(int argc, char *argv[]) {
                 max_waits--;
             }
         } while (duels_active && max_waits > 0);
+
+        round++;
     }
 
     sem_lock(combat_sem);
-    for (int i = 0; i < fighter_count; i++) {
+    for (int i = 0; i < combat_zone->total_count; i++) {
         if (combat_zone->fighters[i].active) {
-            printf("\nТУРНИР ЗАВЕРШЕН! ПОБЕДИТЕЛЬ: БОЕЦ %d\n", i);
-            printf("Количество побед: %d\n", combat_zone->fighters[i].victories);
+            sem_lock(display_sem);
+            printf("Турнир завершен. Победитель: Боец %d\n", i);
+            sem_unlock(display_sem);
+
+            char winner_msg[MSG_SIZE];
+            snprintf(winner_msg, MSG_SIZE, "Турнир завершен! Победитель: Боец %d", i);
+            send_to_watchers(winner_msg, -1, -1, 0, ROCK, ROCK, 0);
             break;
         }
     }
     sem_unlock(combat_sem);
 
-    for (int i = 0; i < fighter_count; i++) {
-        int status;
-        waitpid(pids[i], &status, 0);
-    }
+    printf("Все бои завершены\n");
+    sleep(2);
 
-    printf("Турнир завершен. Очистка ресурсов\n");
     zone_cleanup();
-
     return 0;
 }
