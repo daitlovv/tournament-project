@@ -22,12 +22,24 @@ typedef enum {
 } HandSign;
 
 typedef struct {
+    char text[MSG_SIZE];
+    int from_id;
+    int against_id;
+    int round_count;
+    int is_result;
+    HandSign move1;
+    HandSign move2;
+    int duel_rounds;
+} DuelMessage;
+
+typedef struct {
     int id;
     int active;
     int victories;
     HandSign gesture;
     int has_rival;
     int rival_id;
+    int connected;
 } Combatant;
 
 typedef struct {
@@ -38,17 +50,6 @@ typedef struct {
     int finished;
     int terminated;
 } Arena;
-
-typedef struct {
-    char text[MSG_SIZE];
-    int from_id;
-    int against_id;
-    int round_count;
-    int is_result;
-    HandSign move1;
-    HandSign move2;
-    int duel_rounds;
-} DuelMessage;
 
 Arena *combat_zone;
 int zone_fd;
@@ -97,8 +98,6 @@ void send_to_watchers(const char* message, int from_id, int against_id,
         int pipe_fd = open(pipe_path, O_WRONLY | O_NONBLOCK);
         if (pipe_fd != -1) {
             ssize_t written = write(pipe_fd, &msg, sizeof(DuelMessage));
-            if (written != sizeof(DuelMessage)) {
-            }
             close(pipe_fd);
         }
     }
@@ -202,7 +201,7 @@ int check_fighters_ready() {
     sem_lock(combat_sem);
     int ready = 0;
     for (int i = 0; i < combat_zone->total_count; i++) {
-        if (combat_zone->fighters[i].active) {
+        if (combat_zone->fighters[i].active && combat_zone->fighters[i].connected) {
             ready++;
         }
     }
@@ -257,6 +256,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < fighter_count; i++) {
         combat_zone->fighters[i].id = i;
         combat_zone->fighters[i].active = 1;
+        combat_zone->fighters[i].connected = 0;
         combat_zone->fighters[i].victories = 0;
         combat_zone->fighters[i].gesture = ROCK;
         combat_zone->fighters[i].has_rival = 0;
@@ -305,33 +305,13 @@ int main(int argc, char *argv[]) {
     printf("Запустите %d процессов fighter с идентификаторами от 0 до %d\n",
            fighter_count, fighter_count - 1);
 
+    printf("Ожидание подключения бойцов\n");
+    printf("У вас есть 60 секунд чтобы запустить бойцов.\n");
+    sleep(60);
+
     send_to_watchers("Турнир начал работу", -1, -1, 0, ROCK, ROCK, 0);
 
-    printf("Ожидание подключения бойцов\n");
-    sleep(30);
-
-    int max_wait = 60;
-    int ready_fighters = 0;
-    while (max_wait > 0) {
-        ready_fighters = check_fighters_ready();
-        if (ready_fighters == fighter_count) {
-            break;
-        }
-        sleep(1);
-        max_wait--;
-        printf("Ожидание бойцов (%d из %d)\n", ready_fighters, fighter_count);
-    }
-
-    if (ready_fighters != fighter_count) {
-        printf("Не все бойцы подключились\n");
-        zone_cleanup();
-        return 1;
-    }
-
-    printf("Турнир Камень-Ножницы-Бумага начинается\n\n");
-
-    printf("Ожидание подключения наблюдателей\n");
-    sleep(5);
+    printf("Начинаем турнир!\n");
 
     int round = 0;
     while (!combat_zone->finished) {
