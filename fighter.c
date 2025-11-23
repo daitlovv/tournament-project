@@ -22,12 +22,24 @@ typedef enum {
 } HandSign;
 
 typedef struct {
+    char text[MSG_SIZE];
+    int from_id;
+    int against_id;
+    int round_count;
+    int is_result;
+    HandSign move1;
+    HandSign move2;
+    int duel_rounds;
+} DuelMessage;
+
+typedef struct {
     int id;
     int active;
     int victories;
     HandSign gesture;
     int has_rival;
     int rival_id;
+    int connected;
 } Combatant;
 
 typedef struct {
@@ -38,17 +50,6 @@ typedef struct {
     int finished;
     int terminated;
 } Arena;
-
-typedef struct {
-    char text[MSG_SIZE];
-    int from_id;
-    int against_id;
-    int round_count;
-    int is_result;
-    HandSign move1;
-    HandSign move2;
-    int duel_rounds;
-} DuelMessage;
 
 Arena *combat_zone;
 int zone_fd;
@@ -86,9 +87,7 @@ void send_to_watchers(const char* message, int from_id, int against_id,
         snprintf(pipe_path, sizeof(pipe_path), "%s_%d", OBSERVER_PATH_BASE, i);
         int pipe_fd = open(pipe_path, O_WRONLY | O_NONBLOCK);
         if (pipe_fd != -1) {
-            ssize_t written = write(pipe_fd, &msg, sizeof(DuelMessage));
-            if (written != sizeof(DuelMessage)) {
-            }
+            write(pipe_fd, &msg, sizeof(DuelMessage));
             close(pipe_fd);
         }
     }
@@ -113,7 +112,7 @@ void signal_handler(int sig) {
 }
 
 HandSign get_winner(HandSign sign1, HandSign sign2) {
-    if (sign1 == sign2) return -1;
+    if (sign1 == sign2) return (HandSign)-1;
 
     if ((sign1 == ROCK && sign2 == SCISSORS) ||
         (sign1 == SCISSORS && sign2 == PAPER) ||
@@ -157,6 +156,15 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     srand(time(NULL) + fighter_id + getpid());
 
+    int wait_attempts = 30;
+    while (wait_attempts > 0) {
+        if (check_zone_exists()) {
+            break;
+        }
+        sleep(1);
+        wait_attempts--;
+    }
+
     if (!check_zone_exists()) {
         printf("Боец %d: арена не создана\n", fighter_id);
         return 1;
@@ -182,13 +190,28 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    int id_check_attempts = 30;
+    while (id_check_attempts > 0) {
+        sem_lock(combat_sem);
+        if (combat_zone->total_count > 0 && fighter_id < combat_zone->total_count) {
+            sem_unlock(combat_sem);
+            break;
+        }
+        sem_unlock(combat_sem);
+        sleep(1);
+        id_check_attempts--;
+    }
+
     sem_lock(combat_sem);
-    if (fighter_id >= combat_zone->total_count) {
-        printf("Боец %d: недопустимый ID для этого турнира (макс: %d)\n", fighter_id, combat_zone->total_count-1);
+    if (fighter_id >= combat_zone->total_count || combat_zone->total_count == 0) {
+        printf("Боец %d: недопустимый ID или турнир не готов (макс: %d)\n", 
+               fighter_id, combat_zone->total_count > 0 ? combat_zone->total_count-1 : -1);
         sem_unlock(combat_sem);
         fighter_cleanup();
         return 1;
     }
+    
+    combat_zone->fighters[fighter_id].connected = 1;
     sem_unlock(combat_sem);
 
     printf("Боец %d начал участие в турнире\n", fighter_id);
@@ -237,7 +260,7 @@ int main(int argc, char *argv[]) {
                     send_to_watchers(message, fighter_id, rival_id, 0, my_move, rival_move, round_count);
                 }
 
-                if (winner_move == -1) {
+                if (winner_move == (HandSign)-1) {
                     snprintf(message, MSG_SIZE, "Ничья в раунде %d боя %d vs %d", round_count, fighter_id, rival_id);
                     send_to_watchers(message, fighter_id, rival_id, 0, my_move, rival_move, round_count);
 
@@ -253,7 +276,7 @@ int main(int argc, char *argv[]) {
                         break;
                     }
                 }
-            } while (winner_move == -1);
+            } while (winner_move == (HandSign)-1);
 
             if (combat_zone->finished || combat_zone->terminated ||
                 !combat_zone->fighters[fighter_id].active) {
@@ -261,7 +284,7 @@ int main(int argc, char *argv[]) {
                 break;
             }
 
-            if (winner_move != -1) {
+            if (winner_move != (HandSign)-1) {
                 char message[MSG_SIZE];
                 if (winner_move == my_move) {
                     snprintf(message, MSG_SIZE, "Боец %d победил Бойца %d за %d раундов", fighter_id, rival_id, round_count);
