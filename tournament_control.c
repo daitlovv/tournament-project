@@ -308,6 +308,7 @@ int main(int argc, char *argv[]) {
     send_to_watchers("Турнир начал работу", -1, -1, 0, ROCK, ROCK, 0);
 
     printf("Ожидание подключения бойцов\n");
+    sleep(30);
 
     int max_wait = 60;
     int ready_fighters = 0;
