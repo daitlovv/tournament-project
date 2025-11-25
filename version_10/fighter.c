@@ -8,11 +8,14 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <fcntl.h>
 
 #define MAX_FIGHTERS 32
 #define MSG_SIZE 256
 #define OBSERVER_PATH_BASE "/tmp/battle_observer"
 #define MAX_OBSERVERS 10
+#define SHM_NAME "/battle_arena_10"
+#define SEM_NAME "/battle_sem_10"
 
 typedef enum {
     ROCK = 0,
@@ -86,7 +89,8 @@ void send_to_watchers(const char* message, int from_id, int against_id,
         snprintf(pipe_path, sizeof(pipe_path), "%s_%d", OBSERVER_PATH_BASE, i);
         int pipe_fd = open(pipe_path, O_WRONLY | O_NONBLOCK);
         if (pipe_fd != -1) {
-            write(pipe_fd, &msg, sizeof(DuelMessage));
+            ssize_t bytes_written = write(pipe_fd, &msg, sizeof(DuelMessage));
+            (void)bytes_written;
             close(pipe_fd);
         }
     }
@@ -131,7 +135,7 @@ const char* gesture_name(HandSign sign) {
 }
 
 int check_zone_exists() {
-    int fd = shm_open("/battle_ground", O_RDONLY, 0666);
+    int fd = shm_open("/battle_arena_10", O_RDONLY, 0666);
     if (fd == -1) {
         return 0;
     }
@@ -169,7 +173,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    zone_fd = shm_open("/battle_ground", O_RDWR, 0666);
+    zone_fd = shm_open("/battle_arena_10", O_RDWR, 0666);
     if (zone_fd == -1) {
         printf("У бойца %d проблема с подключением к арене.\n", fighter_id);
         return 1;
@@ -182,7 +186,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    combat_sem = sem_open("/battle_semaphore", 0);
+    combat_sem = sem_open(SEM_NAME, 0);
     if (combat_sem == SEM_FAILED) {
         printf("У бойца %d проблема с подключением к семафору битвы.\n", fighter_id);
         fighter_cleanup();
@@ -240,9 +244,10 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            HandSign my_move, rival_move, winner_move;
+            HandSign my_move;
+            HandSign rival_move;
+            HandSign winner_move;
             int duel_rounds = 0;
-            int max_rounds = 10;
 
             do {
                 duel_rounds++;
@@ -263,14 +268,6 @@ int main(int argc, char *argv[]) {
                     char message[MSG_SIZE];
                     snprintf(message, MSG_SIZE, "Ничья в бою %d vs %d (раунд %d).", fighter_id, rival_id, duel_rounds);
                     send_to_watchers(message, fighter_id, rival_id, 0, my_move, rival_move, duel_rounds);
-
-                    if (duel_rounds >= max_rounds) {
-                        winner_move = (rand() % 2) ? my_move : rival_move;
-                        char force_msg[MSG_SIZE];
-                        snprintf(force_msg, MSG_SIZE, "Принудительное завершение ничьи после %d раундов.", max_rounds);
-                        send_to_watchers(force_msg, fighter_id, rival_id, 0, my_move, rival_move, duel_rounds);
-                        break;
-                    }
 
                     struct timespec delay = {0, 100000000};
                     int sleep_result;
