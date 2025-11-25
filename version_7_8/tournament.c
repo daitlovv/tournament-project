@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <time.h>
 #include <fcntl.h>
+#include <sys/wait.h>
 
 #define MAX_FIGHTERS 32
 #define SHM_NAME "/battle_arena_78"
@@ -82,8 +83,8 @@ void signal_handler(int sig) {
 }
 
 int get_connected_count() {
-    int count = 0;
     sem_lock(arena_sem);
+    int count = 0;
     for (int i = 0; i < arena->total_count; i++) {
         if (arena->fighters[i].connected) {
             count++;
@@ -95,7 +96,7 @@ int get_connected_count() {
 
 void print_active_fighters() {
     sem_lock(arena_sem);
-    printf("Промежуточные победители: ");
+    printf("\nПромежуточные победители: ");
     int first = 1;
     for (int i = 0; i < arena->total_count; i++) {
         if (arena->fighters[i].active) {
@@ -220,8 +221,11 @@ int main(int argc, char *argv[]) {
     }
 
     printf("\nОжидание подключения всех бойцов...\n");
-    int wait_attempts = 30;
+    int wait_attempts = 60;
     int last_connected = -1;
+
+    printf("У вас есть 60 секунд, чтобы подключить игроков.\n");
+
 
     while (wait_attempts > 0) {
         int connected = get_connected_count();
@@ -306,5 +310,8 @@ int main(int argc, char *argv[]) {
     printf("Все бои завершены.\n");
     sleep(2);
     cleanup_resources();
+    
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
+    
     return 0;
 }
