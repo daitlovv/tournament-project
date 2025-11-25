@@ -9,8 +9,11 @@
 #include <errno.h>
 #include <time.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 
 #define MAX_FIGHTERS 32
+#define SHM_NAME "/tournament_shm_46"
+#define SEM_NAME "/tournament_sem_46"
 
 typedef enum {
     ROCK = 0,
@@ -36,7 +39,10 @@ typedef struct {
 } Arena;
 
 Arena *combat_zone;
+int shm_fd;
 sem_t *combat_sem;
+pid_t fighter_pids[MAX_FIGHTERS];
+int fighter_count;
 
 void sem_lock(sem_t *sem) {
     int result;
@@ -84,7 +90,6 @@ void fighter_process(int fighter_id) {
 
         if (!combat_zone->fighters[fighter_id].active) {
             sem_unlock(combat_sem);
-            printf("Боец %d выбыл из турнира.\n", fighter_id);
             break;
         }
 
@@ -92,29 +97,48 @@ void fighter_process(int fighter_id) {
             int rival_id = combat_zone->fighters[fighter_id].rival_id;
 
             if (rival_id >= 0 && rival_id < combat_zone->total_count &&
+                combat_zone->fighters[rival_id].has_rival && 
+                combat_zone->fighters[rival_id].rival_id == fighter_id &&
+                fighter_id > rival_id) {
+                combat_zone->fighters[fighter_id].has_rival = 0;
+                combat_zone->fighters[fighter_id].rival_id = -1;
+                sem_unlock(combat_sem);
+                continue;
+            }
+
+            if (rival_id >= 0 && rival_id < combat_zone->total_count &&
                 combat_zone->fighters[rival_id].active) {
 
                 HandSign my_move = rand() % 3;
                 HandSign rival_move = rand() % 3;
                 HandSign winner = get_winner(my_move, rival_move);
+                int duel_rounds = 0;
 
-                printf("Бой %d vs %d: %s vs %s -> ",
-                       fighter_id, rival_id,
-                       gesture_name(my_move), gesture_name(rival_move));
+                do {
+                    duel_rounds++;
+                    my_move = rand() % 3;
+                    rival_move = rand() % 3;
+                    winner = get_winner(my_move, rival_move);
 
-                if (winner == my_move) {
-                    printf("Победил Боец %d\n", fighter_id);
-                    combat_zone->fighters[fighter_id].victories++;
-                    combat_zone->fighters[rival_id].active = 0;
-                    combat_zone->alive_count--;
-                } else if (winner == rival_move) {
-                    printf("Победил Боец %d\n", rival_id);
-                    combat_zone->fighters[rival_id].victories++;
-                    combat_zone->fighters[fighter_id].active = 0;
-                    combat_zone->alive_count--;
-                } else {
-                    printf("Ничья, повтор раунда\n");
-                }
+                    printf("Бой %d vs %d (раунд %d): %s vs %s => ",
+                        fighter_id, rival_id, duel_rounds,
+                        gesture_name(my_move), gesture_name(rival_move));
+
+                    if (winner == my_move) {
+                        printf("Победил Боец %d\n", fighter_id);
+                        combat_zone->fighters[fighter_id].victories++;
+                        combat_zone->fighters[rival_id].active = 0;
+                        combat_zone->alive_count--;
+                    } else if (winner == rival_move) {
+                        printf("Победил Боец %d\n", rival_id);
+                        combat_zone->fighters[rival_id].victories++;
+                        combat_zone->fighters[fighter_id].active = 0;
+                        combat_zone->alive_count--;
+                    } else {
+                        printf("Ничья\n");
+                        usleep(300000);
+                    }
+                } while (winner == (HandSign)-1);
 
                 combat_zone->fighters[fighter_id].has_rival = 0;
                 combat_zone->fighters[fighter_id].rival_id = -1;
@@ -172,12 +196,29 @@ void setup_round() {
     sem_unlock(combat_sem);
 }
 
+void kill_fighters() {
+    for (int i = 0; i < fighter_count; i++) {
+        if (fighter_pids[i] > 0) {
+            kill(fighter_pids[i], SIGTERM);
+        }
+    }
+}
+
 void cleanup() {
     printf("Очистка ресурсов.\n");
+    kill_fighters();
+
+    for (int i = 0; i < fighter_count; i++) {
+        wait(NULL);
+    }
+
     if (combat_zone) {
         munmap(combat_zone, sizeof(Arena));
     }
-    sem_destroy(combat_sem);
+    if (shm_fd != -1) {
+        close(shm_fd);
+        shm_unlink(SHM_NAME);
+    }
 }
 
 void signal_handler(int sig) {
@@ -196,7 +237,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    int fighter_count = atoi(argv[1]);
+    fighter_count = atoi(argv[1]);
     if (fighter_count < 2 || fighter_count > MAX_FIGHTERS) {
         printf("Количество бойцов должно быть от 2 до %d.\n", MAX_FIGHTERS);
         return 1;
@@ -209,10 +250,25 @@ int main(int argc, char *argv[]) {
     printf("------ Центр управления турниром ------\n");
     printf("Количество участников: %d.\n", fighter_count);
 
-    combat_zone = mmap(NULL, sizeof(Arena), PROT_READ | PROT_WRITE,
-                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (combat_zone == MAP_FAILED) {
+    shm_unlink(SHM_NAME);
+
+
+    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
         perror("Проблема с созданием разделяемой памяти.");
+        return 1;
+    }
+
+    if (ftruncate(shm_fd, sizeof(Arena)) == -1) {
+        perror("Проблема с установкой размера памяти.");
+        close(shm_fd);
+        return 1;
+    }
+
+    combat_zone = mmap(NULL, sizeof(Arena), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (combat_zone == MAP_FAILED) {
+        perror("Проблема с отображением памяти.");
+        close(shm_fd);
         return 1;
     }
 
@@ -229,10 +285,11 @@ int main(int argc, char *argv[]) {
         combat_zone->fighters[i].rival_id = -1;
     }
 
-    combat_sem = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE,
-                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    sem_t sem;
+    combat_sem = &sem;
     if (sem_init(combat_sem, 1, 1) == -1) {
         perror("Проблема с созданием семафора.");
+        cleanup();
         return 1;
     }
 
@@ -244,6 +301,8 @@ int main(int argc, char *argv[]) {
         } else if (pid < 0) {
             perror("Проблема с созданием процесса бойца.");
             return 1;
+        } else {
+            fighter_pids[i] = pid;
         }
     }
 
