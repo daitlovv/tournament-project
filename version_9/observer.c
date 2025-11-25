@@ -9,6 +9,7 @@
 #define PIPE_NAME "/tmp/tournament_observer_9"
 
 int pipe_fd = -1;
+volatile sig_atomic_t keep_running = 1;
 
 void cleanup() {
   if (pipe_fd != -1) {
@@ -18,8 +19,7 @@ void cleanup() {
 
 void signal_handler(int sig) {
   printf("\nНаблюдатель остановлен по сигналу %d.\n", sig);
-  cleanup();
-  exit(0);
+  keep_running = 0;
 }
 
 int main() {
@@ -28,7 +28,20 @@ int main() {
   signal(SIGINT, signal_handler);
   signal(SIGTERM, signal_handler);
 
-  printf("Ожидание событий турнира...\n\n");
+  int wait_attempts = 30;
+  while (wait_attempts > 0 && keep_running) {
+      if (access(PIPE_NAME, F_OK) != -1) {
+          break;
+      }
+      printf("Ожидание создания турнира...\n");        
+      sleep(10);
+      wait_attempts--;
+  }
+
+  if (access(PIPE_NAME, F_OK) == -1) {
+      printf("Турнир не запущен в течение данного времени.\n");
+      return 1;
+  }
 
   pipe_fd = open(PIPE_NAME, O_RDONLY);
   if (pipe_fd == -1) {
@@ -36,11 +49,13 @@ int main() {
     return 1;
   }
 
+  printf("Ожидание событий турнира...\n\n");
+
   char buffer[256];
   int message_count = 0;
   int empty_reads = 0;
 
-  while (1) {
+  while (keep_running) {
     int bytes_read = read(pipe_fd, buffer, sizeof(buffer) - 1);
     if (bytes_read > 0) {
       empty_reads = 0;
