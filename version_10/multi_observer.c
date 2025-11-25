@@ -12,8 +12,9 @@
 
 #define MAX_FIGHTERS 32
 #define MSG_SIZE 256
-#define OBSERVER_PATH_BASE "/tmp/battle_observer"
+#define OBSERVER_PATH_BASE "/tmp/battle_observer_10"
 #define MAX_OBSERVERS 10
+#define SHM_NAME "/battle_arena_10"
 
 typedef enum {
     ROCK = 0,
@@ -49,14 +50,6 @@ int create_watch_channel(int watch_id) {
     char pipe_path[64];
     snprintf(pipe_path, sizeof(pipe_path), "%s_%d", OBSERVER_PATH_BASE, watch_id);
 
-    if (access(pipe_path, F_OK) != -1) {
-        unlink(pipe_path);
-    }
-
-    if (mkfifo(pipe_path, 0666) == -1) {
-        return -1;
-    }
-
     strcpy(observer_pipe_path, pipe_path);
     return 0;
 }
@@ -68,7 +61,6 @@ int get_duel_update(DuelMessage *msg) {
             return 0;
         }
     }
-
     int bytes_read = read(observer_pipe, msg, sizeof(DuelMessage));
     if (bytes_read == sizeof(DuelMessage)) {
         return 1;
@@ -77,7 +69,7 @@ int get_duel_update(DuelMessage *msg) {
 }
 
 int check_tournament_finished() {
-    int fd = shm_open("/battle_ground", O_RDONLY, 0666);
+    int fd = shm_open(SHM_NAME, O_RDONLY, 0666);
     if (fd == -1) {
         return 1;
     }
@@ -90,7 +82,6 @@ void observer_cleanup() {
         close(observer_pipe);
         observer_pipe = -1;
     }
-    unlink(observer_pipe_path);
 }
 
 void signal_handler(int sig) {
