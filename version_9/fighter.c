@@ -234,26 +234,45 @@ int main(int argc, char *argv[]) {
                     gesture_name(my_move), gesture_name(rival_move));
             send_to_observer(battle_msg, fighter_id, rival_id);
 
-            if (winner_move == my_move) {
-                printf("Победил Боец %d\n", fighter_id);
-                char win_msg[256];
-                snprintf(win_msg, sizeof(win_msg), "Победил Боец %d", fighter_id);
-                send_to_observer(win_msg, fighter_id, rival_id);
-                arena->fighters[fighter_id].victories++;
-                arena->fighters[rival_id].active = 0;
-                arena->alive_count--;
-            } else if (winner_move == rival_move) {
-                printf("Победил Боец %d\n", rival_id);
-                char win_msg[256];
-                snprintf(win_msg, sizeof(win_msg), "Победил Боец %d", rival_id);
-                send_to_observer(win_msg, fighter_id, rival_id);
-                arena->fighters[rival_id].victories++;
-                arena->fighters[fighter_id].active = 0;
-                arena->alive_count--;
-            } else {
-                printf("Ничья\n");
-                send_to_observer("Ничья", fighter_id, rival_id);
-            }
+            int duel_rounds = 0;
+
+            do {
+                duel_rounds++;
+                my_move = rand() % 3;
+                rival_move = rand() % 3;
+                winner_move = get_winner(my_move, rival_move);
+
+                printf("Бой %d vs %d (раунд %d): %s vs %s => ",
+                    fighter_id, rival_id, duel_rounds,
+                    gesture_name(my_move), gesture_name(rival_move));
+
+                char battle_msg[256];
+                snprintf(battle_msg, sizeof(battle_msg), "Бой: %s vs %s",
+                        gesture_name(my_move), gesture_name(rival_move));
+                send_to_observer(battle_msg, fighter_id, rival_id);
+
+                if (winner_move == my_move) {
+                    printf("Победил Боец %d\n", fighter_id);
+                    char win_msg[256];
+                    snprintf(win_msg, sizeof(win_msg), "Победил Боец %d", fighter_id);
+                    send_to_observer(win_msg, fighter_id, rival_id);
+                    arena->fighters[fighter_id].victories++;
+                    arena->fighters[rival_id].active = 0;
+                    arena->alive_count--;
+                } else if (winner_move == rival_move) {
+                    printf("Победил Боец %d\n", rival_id);
+                    char win_msg[256];
+                    snprintf(win_msg, sizeof(win_msg), "Победил Боец %d", rival_id);
+                    send_to_observer(win_msg, fighter_id, rival_id);
+                    arena->fighters[rival_id].victories++;
+                    arena->fighters[fighter_id].active = 0;
+                    arena->alive_count--;
+                } else {
+                    printf("Ничья\n");
+                    send_to_observer("Ничья", fighter_id, rival_id);
+                    usleep(300000);
+                }
+            } while (winner_move == (HandSign)-1);
 
             arena->fighters[fighter_id].has_rival = 0;
             arena->fighters[fighter_id].rival_id = -1;
