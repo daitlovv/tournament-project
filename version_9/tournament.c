@@ -68,7 +68,8 @@ void send_to_observer(const char* message, int from_id, int against_id) {
         } else {
             snprintf(full_msg, sizeof(full_msg), "Бой %d vs %d: %s", from_id, against_id, message);
         }
-        write(pipe_fd, full_msg, strlen(full_msg) + 1);
+        ssize_t written = write(pipe_fd, full_msg, strlen(full_msg) + 1);
+        (void)written;
         close(pipe_fd);
     }
 }
@@ -101,8 +102,8 @@ void signal_handler(int sig) {
 }
 
 int get_connected_count() {
-    int count = 0;
     sem_lock(arena_sem);
+    int count = 0;
     for (int i = 0; i < arena->total_count; i++) {
         if (arena->fighters[i].connected) {
             count++;
@@ -114,7 +115,7 @@ int get_connected_count() {
 
 void print_active_fighters() {
     sem_lock(arena_sem);
-    printf("Промежуточные победители: ");
+    printf("\nПромежуточные победители: ");
     int first = 1;
     for (int i = 0; i < arena->total_count; i++) {
         if (arena->fighters[i].active) {
@@ -141,4 +142,211 @@ void setup_round() {
     int count = 0;
 
     for (int i = 0; i < arena->total_count; i++) {
-        if (arena->fighters
+        if (arena->fighters[i].active && !arena->fighters[i].has_rival) {
+            ready_fighters[count++] = i;
+        }
+    }
+
+    for (int i = count - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        int temp = ready_fighters[i];
+        ready_fighters[i] = ready_fighters[j];
+        ready_fighters[j] = temp;
+    }
+
+    for (int i = 0; i < count - 1; i += 2) {
+        int fighter1 = ready_fighters[i];
+        int fighter2 = ready_fighters[i + 1];
+
+        arena->fighters[fighter1].has_rival = 1;
+        arena->fighters[fighter1].rival_id = fighter2;
+        arena->fighters[fighter2].has_rival = 1;
+        arena->fighters[fighter2].rival_id = fighter1;
+
+        printf("Организован бой: Боец %d vs Боец %d\n", fighter1, fighter2);
+        char message[256];
+        snprintf(message, sizeof(message), "Организован бой: Боец %d vs Боец %d", fighter1, fighter2);
+        send_to_observer(message, -1, -1);
+    }
+
+    arena->round_num++;
+    printf("Начало раунда %d. Бойцов готово к бою: %d\n", arena->round_num, count);
+
+    char round_msg[256];
+    snprintf(round_msg, sizeof(round_msg), "Начало раунда %d.", arena->round_num);
+    send_to_observer(round_msg, -1, -1);
+
+    sem_unlock(arena_sem);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        printf("Использовано %s <количество_бойцов>.\n", argv[0]);
+        return 1;
+    }
+
+    int fighter_count = atoi(argv[1]);
+    if (fighter_count < 2 || fighter_count > MAX_FIGHTERS) {
+        printf("Количество бойцов должно быть от 2 до %d.\n", MAX_FIGHTERS);
+        return 1;
+    }
+
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    srand(time(NULL));
+
+    printf("------ Центр управления турниром ------\n");
+    printf("Количество участников: %d.\n", fighter_count);
+
+    shm_unlink(SHM_NAME);
+    sem_unlink(SEM_NAME);
+    unlink(PIPE_NAME);
+
+    if (mkfifo(PIPE_NAME, 0666) == -1 && errno != EEXIST) {
+        perror("Проблема с созданием канала");
+        return 1;
+    }
+
+    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        perror("Проблема с созданием разделяемой памяти.");
+        return 1;
+    }
+
+    if (ftruncate(shm_fd, sizeof(Arena)) == -1) {
+        perror("Проблема с установкой размера памяти.");
+        close(shm_fd);
+        return 1;
+    }
+
+    arena = mmap(NULL, sizeof(Arena), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (arena == MAP_FAILED) {
+        perror("Проблема с отображением памяти.");
+        close(shm_fd);
+        return 1;
+    }
+
+    memset(arena, 0, sizeof(Arena));
+    arena->total_count = fighter_count;
+    arena->alive_count = fighter_count;
+
+    for (int i = 0; i < fighter_count; i++) {
+        arena->fighters[i].id = i;
+        arena->fighters[i].active = 1;
+        arena->fighters[i].connected = 0;
+        arena->fighters[i].victories = 0;
+        arena->fighters[i].gesture = ROCK;
+        arena->fighters[i].has_rival = 0;
+        arena->fighters[i].rival_id = -1;
+    }
+
+    arena_sem = sem_open(SEM_NAME, O_CREAT, 0666, 1);
+    if (arena_sem == SEM_FAILED) {
+        perror("Проблема с созданием семафора.");
+        cleanup_resources();
+        return 1;
+    }
+
+    printf("Арена создана. Запустите процессы fighter и observer:\n");
+    for (int i = 0; i < fighter_count; i++) {
+        printf("  ./fighter %d\n", i);
+    }
+    printf("  ./observer\n");
+
+    printf("\nОжидание подключения всех бойцов...\n");
+    int wait_attempts = 60;
+    int last_connected = -1;
+
+    printf("У вас есть 60 секунд, чтобы подключить игроков.\n");
+
+    while (wait_attempts > 0) {
+        int connected = get_connected_count();
+
+        if (connected != last_connected) {
+            printf("Подключено %d/%d бойцов\n", connected, fighter_count);
+            last_connected = connected;
+        }
+
+        if (connected == fighter_count) {
+            printf("Все бойцы подключены!\n");
+            break;
+        }
+        sleep(1);
+        wait_attempts--;
+    }
+
+    if (get_connected_count() != fighter_count) {
+        printf("Не все бойцы подключились. Турнир отменен.\n");
+        cleanup_resources();
+        return 1;
+    }
+
+    printf("\n------ Турнир начинается! ------\n");
+    send_to_observer("Турнир начинается!", -1, -1);
+    sleep(2);
+
+    int round = 0;
+    while (!arena->finished) {
+        sem_lock(arena_sem);
+        int active = arena->alive_count;
+        sem_unlock(arena_sem);
+
+        if (active <= 1) {
+            sem_lock(arena_sem);
+            arena->finished = 1;
+            sem_unlock(arena_sem);
+            break;
+        }
+
+        printf("\n--- Раунд %d ---\n", ++round);
+        printf("Активных бойцов: %d\n", active);
+
+        setup_round();
+        sleep(3);
+
+        int duels_active;
+        int max_waits = 30;
+        do {
+            duels_active = 0;
+            sem_lock(arena_sem);
+            for (int i = 0; i < fighter_count; i++) {
+                if (arena->fighters[i].has_rival) {
+                    duels_active = 1;
+                    break;
+                }
+            }
+            sem_unlock(arena_sem);
+            if (duels_active) {
+                sleep(1);
+                max_waits--;
+            }
+        } while (duels_active && max_waits > 0);
+
+        print_active_fighters();
+    }
+
+    sem_lock(arena_sem);
+    int winner_found = 0;
+    for (int i = 0; i < fighter_count; i++) {
+        if (arena->fighters[i].active) {
+            printf("\nТурнир завершен! Победитель: Боец %d\n", i);
+            char winner_msg[256];
+            snprintf(winner_msg, sizeof(winner_msg), "Турнир завершен! Победитель: Боец %d", i);
+            send_to_observer(winner_msg, -1, -1);
+            winner_found = 1;
+            break;
+        }
+    }
+
+    if (!winner_found) {
+        printf("\nТурнир завершен! Победитель не определен.\n");
+        send_to_observer("Турнир завершен! Победитель не определен.", -1, -1);
+    }
+    sem_unlock(arena_sem);
+
+    printf("Все бои завершены.\n");
+    send_to_observer("Все бои завершены.", -1, -1);
+    sleep(2);
+    cleanup_resources();
+    return 0;
+}
