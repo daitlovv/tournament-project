@@ -12,8 +12,10 @@
 
 #define MAX_FIGHTERS 32
 #define MSG_SIZE 256
-#define OBSERVER_PATH_BASE "/tmp/battle_observer"
+#define OBSERVER_PATH_BASE "/tmp/battle_observer_10"
 #define MAX_OBSERVERS 10
+#define SHM_NAME "/battle_arena_10"
+#define SEM_NAME "/battle_sem_10"
 
 typedef enum {
     ROCK = 0,
@@ -55,6 +57,17 @@ Arena *combat_zone;
 int zone_fd;
 sem_t *combat_sem;
 
+void create_observer_channels() {
+    for (int i = 0; i < MAX_OBSERVERS; i++) {
+        char pipe_path[64];
+        snprintf(pipe_path, sizeof(pipe_path), "%s_%d", OBSERVER_PATH_BASE, i);
+        if (access(pipe_path, F_OK) != -1) {
+            unlink(pipe_path);
+        }
+        mkfifo(pipe_path, 0666);
+    }
+}
+
 void sem_lock(sem_t *sem) {
     int result;
     do {
@@ -87,8 +100,8 @@ void send_to_watchers(const char* message, int from_id, int against_id,
         snprintf(pipe_path, sizeof(pipe_path), "%s_%d", OBSERVER_PATH_BASE, i);
         int pipe_fd = open(pipe_path, O_WRONLY | O_NONBLOCK);
         if (pipe_fd != -1) {
-            ssize_t bytes_written = write(pipe_fd, &msg, sizeof(DuelMessage));
-            (void)bytes_written;
+            ssize_t written = write(pipe_fd, &msg, sizeof(DuelMessage));
+            (void)written;
             close(pipe_fd);
         }
     }
@@ -101,11 +114,11 @@ void cleanup_resources() {
     }
     if (zone_fd != -1) {
         close(zone_fd);
-        shm_unlink("/battle_ground");
+        shm_unlink(SHM_NAME);
     }
     if (combat_sem != SEM_FAILED) {
         sem_close(combat_sem);
-        sem_unlink("/battle_semaphore");
+        sem_unlink(SEM_NAME);
     }
 
     for (int i = 0; i < MAX_OBSERVERS; i++) {
@@ -127,29 +140,16 @@ void signal_handler(int sig) {
     exit(0);
 }
 
-int check_all_fighters_connected() {
+int get_connected_count() {
     sem_lock(combat_sem);
-    int all_connected = 1;
+    int count = 0;
     for (int i = 0; i < combat_zone->total_count; i++) {
-        if (!combat_zone->fighters[i].connected) {
-            all_connected = 0;
-            break;
+        if (combat_zone->fighters[i].connected) {
+            count++;
         }
     }
     sem_unlock(combat_sem);
-    return all_connected;
-}
-
-int get_connected_count() {
-  int count = 0;
-  sem_lock(combat_sem);
-  for (int i = 0; i < combat_zone->total_count; i++) {
-    if (combat_zone->fighters[i].connected) {
-      count++;
-    }
-  }
-  sem_unlock(combat_sem);
-  return count;
+    return count;
 }
 
 void print_active_fighters() {
@@ -237,10 +237,10 @@ int main(int argc, char *argv[]) {
     printf("------ Центр управления турниром ------\n");
     printf("Количество участников: %d.\n", fighter_count);
 
-    shm_unlink("/battle_ground");
-    sem_unlink("/battle_semaphore");
+    shm_unlink(SHM_NAME);
+    sem_unlink(SEM_NAME);
 
-    zone_fd = shm_open("/battle_ground", O_CREAT | O_RDWR, 0666);
+    zone_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
     if (zone_fd == -1) {
         perror("Проблема с созданием разделяемой памяти.");
         return 1;
@@ -273,12 +273,14 @@ int main(int argc, char *argv[]) {
         combat_zone->fighters[i].rival_id = -1;
     }
 
-    combat_sem = sem_open("/battle_semaphore", O_CREAT, 0666, 1);
+    combat_sem = sem_open(SEM_NAME, O_CREAT, 0666, 1);
     if (combat_sem == SEM_FAILED) {
         perror("Проблема с созданием семафора.");
         cleanup_resources();
         return 1;
     }
+
+    create_observer_channels();
 
     printf("Арена создана. Запустите процессы fighter:\n");
     for (int i = 0; i < fighter_count; i++) {
@@ -286,6 +288,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("\nОжидание подключения всех бойцов...\n");
+    printf("У вас есть 60 секунд, чтобы подключить игроков.\n");
     int wait_attempts = 60;
     int last_connected = -1;
     
@@ -301,11 +304,11 @@ int main(int argc, char *argv[]) {
             printf("Все бойцы подключены!\n");
             break;
         }
-        sleep(2);
+        sleep(1);
         wait_attempts--;
     }
 
-    if (!check_all_fighters_connected()) {
+    if (get_connected_count() != fighter_count) {
         printf("Не все бойцы подключились. Турнир отменен.\n");
         cleanup_resources();
         return 1;
