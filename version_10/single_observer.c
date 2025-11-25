@@ -14,6 +14,7 @@
 #define MSG_SIZE 256
 #define OBSERVER_PATH_BASE "/tmp/battle_observer"
 #define OBSERVER_ID 0
+#define SHM_NAME "/battle_arena_10"
 
 typedef enum {
     ROCK = 0,
@@ -76,7 +77,7 @@ int get_duel_update(DuelMessage *msg) {
 }
 
 int check_tournament_finished() {
-    int fd = shm_open("/battle_ground", O_RDONLY, 0666);
+    int fd = shm_open("/battle_arena_10", O_RDONLY, 0666);
     if (fd == -1) {
         return 1;
     }
@@ -98,7 +99,7 @@ void signal_handler(int sig) {
     exit(0);
 }
 
-int main(int argc, char *argv[]) {
+int main() {
     printf("------ Наблюдатель турнира ------\n");
 
     signal(SIGINT, signal_handler);
