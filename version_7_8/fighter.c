@@ -148,7 +148,7 @@ int main(int argc, char *argv[]) {
 
     arena_sem = sem_open(SEM_NAME, 0);
     if (arena_sem == SEM_FAILED) {
-        printf("У бойца %д проблема с подключением к семафору битвы.\n", fighter_id);
+        printf("У бойца %d проблема с подключением к семафору битвы.\n", fighter_id);
         fighter_cleanup();
         return 1;
     }
@@ -210,19 +210,33 @@ int main(int argc, char *argv[]) {
             printf("Бой %d vs %d: %s vs %s -> ", fighter_id, rival_id,
                    gesture_name(my_move), gesture_name(rival_move));
 
-            if (winner_move == my_move) {
-                printf("Победил Боец %d\n", fighter_id);
-                arena->fighters[fighter_id].victories++;
-                arena->fighters[rival_id].active = 0;
-                arena->alive_count--;
-            } else if (winner_move == rival_move) {
-                printf("Победил Боец %d\n", rival_id);
-                arena->fighters[rival_id].victories++;
-                arena->fighters[fighter_id].active = 0;
-                arena->alive_count--;
-            } else {
-                printf("Ничья\n");
-            }
+            int duel_rounds = 0;
+
+            do {
+                duel_rounds++;
+                my_move = rand() % 3;
+                rival_move = rand() % 3;
+                winner_move = get_winner(my_move, rival_move);
+
+                printf("Бой %d vs %d (раунд %d): %s vs %s => ",
+                    fighter_id, rival_id, duel_rounds,
+                    gesture_name(my_move), gesture_name(rival_move));
+
+                if (winner_move == my_move) {
+                    printf("Победил Боец %d\n", fighter_id);
+                    arena->fighters[fighter_id].victories++;
+                    arena->fighters[rival_id].active = 0;
+                    arena->alive_count--;
+                } else if (winner_move == rival_move) {
+                    printf("Победил Боец %d\n", rival_id);
+                    arena->fighters[rival_id].victories++;
+                    arena->fighters[fighter_id].active = 0;
+                    arena->alive_count--;
+                } else {
+                    printf("Ничья\n");
+                    usleep(300000);
+                }
+            } while (winner_move == (HandSign)-1);
 
             arena->fighters[fighter_id].has_rival = 0;
             arena->fighters[fighter_id].rival_id = -1;
